@@ -5,6 +5,7 @@ package writer
 import (
 	"bytes"
 	"encoding/binary"
+	"os"
 	"path/filepath"
 
 	"wtdata/internal/types"
@@ -22,6 +23,13 @@ type Writer struct {
 	disableTrans  bool
 	disableOrdQue bool
 	disableOrdDtl bool
+
+	// tick cache
+	tcFile *os.File
+	tcMap  []byte
+	tcIdx  map[string]uint32
+	tcSize uint32
+	tcCap  uint32
 }
 
 func (w *Writer) Init(base string) {
@@ -43,6 +51,8 @@ func (w *Writer) WriteTick(exchg string, code string, date uint32, tick *types.W
 	m2, err := w.appendOne(f, mapped, buf.Bytes(), rtTickSize())
 	if err != nil { return err }
 	_ = m2 // keep mapped alive until function returns
+	// 更新 TickCache
+	_ = w.UpdateTickCache(exchg, code, date, tick)
 	return nil
 }
 
