@@ -361,8 +361,77 @@ func (r *Reader) extractTrans(payload []byte, from int, n int) []types.WTSTransS
 
 // ---------------- Bars by count ----------------
 
-// ReadKlineSlice 读取最后 count 根K线（对应 WtDataReader::readKlineSlice，支持 QFQ/HFQ 简化复权）
+// ReadKlineSlice 读取最后 count 根K线（对应 WtDataReader::readKlineSlice，支持 QFQ/HFQ 简化复权 + 主连）
 func (r *Reader) ReadKlineSlice(stdCode string, exchg string, code string, period int, count uint32, etime uint64) ([]types.WTSBarStruct, error) {
+	// 主连处理：stdCode 形如 EXCHG.PRODUCT_rule[-|+]?
+	if ex, prod, rule, xr, ok := parseHotStd(stdCode); ok {
+		// 优先读取已合成 hot 文件
+		if payload, lastHot, err := r.loadHotCombinedBars(ex, prod, rule, period, xr); err == nil && len(payload) > 0 {
+			bars := r.extractBarsTail(payload, int(count))
+			// 追加 rt：取当前段代码
+			if period == types.KP_Minute1 || period == types.KP_Minute5 {
+				curCode := currentHotCode(ex, prod, rule, r.currentTradingDate())
+				rtSub := "min1"; if period == types.KP_Minute5 { rtSub = "min5" }
+				rtPath := filepath.Join(r.rtDir, rtSub, ex, fmt.Sprintf("%s.dmb", curCode))
+				if st, e := os.Stat(rtPath); e == nil && st.Size() > 0 {
+					_, size, payloadRt, e2 := rt.ReadKlineBlock(rtPath)
+					if e2 == nil && size > 0 {
+						// 截取 > lastHot 的条目
+						app := []types.WTSBarStruct{}
+						cnt := len(payloadRt) / rt.SizeOfBarV2
+						for i:=0;i<cnt;i++ { b:=r.readBarAt(payloadRt,i); if b.Time>lastHot { app = append(app,b) } }
+						// 复权：QFQ 按 currentFactor/baseFactor；HFQ 按 currentFactor
+						if xr == byte(types.SUFFIX_QFQ) || xr == byte(types.SUFFIX_HFQ) {
+							cf := currentHotFactor(ex, prod, rule, r.currentTradingDate())
+							if xr == byte(types.SUFFIX_QFQ) {
+								bf := latestHotFactor(ex, prod, rule)
+								applyHotFactorToBars(app, cf/bf, r.adjustFlg)
+							} else {
+								applyHotFactorToBars(app, cf, r.adjustFlg)
+							}
+						}
+						bars = append(bars, app...)
+						if int(count) < len(bars) { bars = bars[len(bars)-int(count):] }
+					}
+				}
+			}
+			if len(bars) == 0 { return nil, errors.New("no bars available") }
+			return bars, nil
+		}
+		// 无合成文件，则按分段拼接
+		var lastHot uint64
+		if period == types.KP_Minute1 || period == types.KP_Minute5 {
+			// 若存在合成文件可得 lastHot；此处无合成，lastHot=0
+		}
+		bars, err := r.integrateBarsWithSections(ex, prod, rule, period, xr, lastHot)
+		if err == nil {
+			// 追加 rt
+			var app []types.WTSBarStruct
+			if period == types.KP_Minute1 || period == types.KP_Minute5 {
+				curCode := currentHotCode(ex, prod, rule, r.currentTradingDate())
+				rtSub := "min1"; if period == types.KP_Minute5 { rtSub = "min5" }
+				rtPath := filepath.Join(r.rtDir, rtSub, ex, fmt.Sprintf("%s.dmb", curCode))
+				if st, e := os.Stat(rtPath); e == nil && st.Size() > 0 {
+					_, size, payloadRt, e2 := rt.ReadKlineBlock(rtPath)
+					if e2 == nil && size > 0 {
+						cnt := len(payloadRt) / rt.SizeOfBarV2
+						for i:=0;i<cnt;i++ { app = append(app, r.readBarAt(payloadRt,i)) }
+					}
+				}
+				// 复权 rt 段
+				if xr == byte(types.SUFFIX_QFQ) || xr == byte(types.SUFFIX_HFQ) {
+					cf := currentHotFactor(ex, prod, rule, r.currentTradingDate())
+					if xr == byte(types.SUFFIX_QFQ) { bf := latestHotFactor(ex, prod, rule); applyHotFactorToBars(app, cf/bf, r.adjustFlg) } else { applyHotFactorToBars(app, cf, r.adjustFlg) }
+				}
+			}
+			bars = append(bars, app...)
+			if int(count) < len(bars) { bars = bars[len(bars)-int(count):] }
+			if len(bars) == 0 { return nil, errors.New("no bars available") }
+			return bars, nil
+		}
+	}
+
+	// 非主连：走普通逻辑
 	key := fmt.Sprintf("%s#%d", stdCode, period)
 	payload := r.bars[key]
 	if payload == nil {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"wtdata/internal/codec"
 	"wtdata/internal/rt"
@@ -26,6 +27,27 @@ var hotSections = map[string][]HotSection{}
 func AddHotSections(exchg, product, rule string, secs []HotSection) {
 	key := fmt.Sprintf("%s.%s_%s", exchg, product, rule)
 	hotSections[key] = secs
+}
+
+// parseHotStd 解析 stdCode 中的 product_rule（形如 EXCHG.PRODUCT_rule[-|+]?）
+func parseHotStd(stdCode string) (exchg, product, rule string, exright byte, ok bool) {
+	if stdCode == "" { return "","","",0,false }
+	// 取末尾复权标识
+	last := stdCode[len(stdCode)-1]
+	if last == byte(types.SUFFIX_QFQ) || last == byte(types.SUFFIX_HFQ) {
+		exright = last
+		stdCode = stdCode[:len(stdCode)-1]
+	}
+	parts := strings.Split(stdCode, ".")
+	if len(parts) < 2 { return "","","",exright,false }
+	exchg = parts[0]
+	p := parts[1]
+	if idx := strings.IndexByte(p, '_'); idx > 0 && idx < len(p)-1 {
+		product = p[:idx]
+		rule = p[idx+1:]
+		ok = true
+	}
+	return
 }
 
 // loadHotCombinedBars 尝试直接读取合成的 hot 文件（his/{pname}/{exchg}/{exchg}.{product}_{rule}[Q/H].dsb）
@@ -79,13 +101,11 @@ func (r *Reader) integrateBarsWithSections(exchg, product, rule string, period i
 		// 选取区间 [SDate, EDate]
 		bars := make([]types.WTSBarStruct, len(p)/rt.SizeOfBarV2)
 		for j:=0;j<len(bars);j++ { bars[j]=r.readBarAt(p,j) }
-		// 将日期转换为时间比较
 		// 过滤落在段内且不与 hot 文件重叠
 		filtered := []types.WTSBarStruct{}
 		for _, bar := range bars {
 			in := false
 			if period == types.KP_DAY { in = (bar.Date >= sec.SDate && bar.Date <= sec.EDate) } else {
-				// bar.time 格式 ((date-19900000)*10000 + HHMM)
 				in = (bar.Date >= sec.SDate && bar.Date <= sec.EDate)
 			}
 			if !in { continue }
@@ -98,14 +118,52 @@ func (r *Reader) integrateBarsWithSections(exchg, product, rule string, period i
 			// 复权（若需要）
 			if exright == byte(types.SUFFIX_QFQ) {
 				factor := sec.Factor / baseFactor
-				bar.Open  *= factor; bar.High*=factor; bar.Low*=factor; bar.Close*=factor
-				if (r.adjustFlg & 1) != 0 { bar.Vol/=factor }
-				if (r.adjustFlg & 2) != 0 { bar.Money*=factor }
-				if (r.adjustFlg & 4) != 0 { bar.Hold/=factor; bar.Add/=factor }
+				applyHotFactorToBar(&bar, factor,  r.adjustFlg)
 			}
 			filtered = append(filtered, bar)
 		}
 		res = append(filtered, res...)
 	}
 	return res, nil
+}
+
+func latestHotFactor(exchg, product, rule string) float64 {
+	key := fmt.Sprintf("%s.%s_%s", exchg, product, rule)
+	secs := hotSections[key]
+	if len(secs) == 0 { return 1 }
+	return secs[len(secs)-1].Factor
+}
+
+func currentHotFactor(exchg, product, rule string, date uint32) float64 {
+	key := fmt.Sprintf("%s.%s_%s", exchg, product, rule)
+	secs := hotSections[key]
+	if len(secs) == 0 { return 1 }
+	for i := len(secs)-1; i>=0; i-- {
+		if date >= secs[i].SDate && date <= secs[i].EDate { return secs[i].Factor }
+	}
+	return secs[len(secs)-1].Factor
+}
+
+func currentHotCode(exchg, product, rule string, date uint32) string {
+	key := fmt.Sprintf("%s.%s_%s", exchg, product, rule)
+	secs := hotSections[key]
+	if len(secs) == 0 { return "" }
+	for i := len(secs)-1; i>=0; i-- {
+		if date >= secs[i].SDate && date <= secs[i].EDate { return secs[i].Code }
+	}
+	return secs[len(secs)-1].Code
+}
+
+func applyHotFactorToBar(bar *types.WTSBarStruct, factor float64, flag uint32) {
+	bar.Open  *= factor
+	bar.High  *= factor
+	bar.Low   *= factor
+	bar.Close *= factor
+	if (flag & 1) != 0 { bar.Vol   /= factor }
+	if (flag & 2) != 0 { bar.Money *= factor }
+	if (flag & 4) != 0 { bar.Hold  /= factor; bar.Add /= factor }
+}
+
+func applyHotFactorToBars(bars []types.WTSBarStruct, factor float64, flag uint32) {
+	for i := range bars { applyHotFactorToBar(&bars[i], factor, flag) }
 }

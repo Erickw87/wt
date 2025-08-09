@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -73,7 +74,10 @@ func (w *Writer) ensureTickCacheCap(capMin uint32) error {
 	return nil
 }
 
-// UpdateTickCache 更新/追加一条缓存（对应 WtDataWriter::updateCache 的基础版本，未处理差分字段）
+// UpdateTickCache 更新/追加一条缓存：
+// - 基于 total_* 计算日内 volume/turnover/diff_interest
+// - 郑商所同秒多笔：若同一秒内多条，则 action_time += 200ms（最大不超过该秒末）
+// - 时间/量回退：丢弃并告警
 func (w *Writer) UpdateTickCache(exchg, code string, date uint32, tick *types.WTSTickStruct) error {
 	if w.tcFile == nil { if err := w.openTickCache(); err != nil { return err } }
 	key := fmt.Sprintf("%s.%s", exchg, code)
@@ -88,6 +92,38 @@ func (w *Writer) UpdateTickCache(exchg, code string, date uint32, tick *types.WT
 	}
 	off := tcHeaderLen + int(idx)*tickCacheItemSize()
 	binary.LittleEndian.PutUint32(w.tcMap[off:off+4], date)
+	// 读取上一条，计算差分
+	var prev types.WTSTickStruct
+	_ = binary.Read(bytes.NewReader(w.tcMap[off+4:off+4+rtTickSize()]), binary.LittleEndian, &prev)
+	// 时间回退丢弃
+	if prev.ActionDate > 0 {
+		if tick.ActionDate < prev.ActionDate || (tick.ActionDate == prev.ActionDate && tick.ActionTime < prev.ActionTime) {
+			log.Printf("[cache] drop time rollback %s.%s %d/%d -> %d/%d", exchg, code, prev.ActionDate, prev.ActionTime, tick.ActionDate, tick.ActionTime)
+			return nil
+		}
+	}
+	// 郑商所同秒多笔 +200ms 修正（示例规则：exchg=="CZCE" 且同 ActionDate 秒内 ActionTime==prev.ActionTime）
+	if exchg == "CZCE" && prev.ActionDate == tick.ActionDate && tick.ActionTime == prev.ActionTime {
+		// +200ms，ActionTime 是毫秒；最大限制在该秒末（+999）
+		nt := tick.ActionTime + 200
+		if nt/1000 == prev.ActionTime/1000 { tick.ActionTime = nt } else { tick.ActionTime = (tick.ActionTime/1000)*1000 + 999 }
+	}
+	// 差分字段：volume/turnover/diff_interest
+	if tick.TotalVolume >= prev.TotalVolume {
+		tick.Volume = tick.TotalVolume - prev.TotalVolume
+	} else {
+		log.Printf("[cache] vol rollback %s.%s total %.0f->%.0f", exchg, code, prev.TotalVolume, tick.TotalVolume)
+		tick.Volume = 0
+	}
+	if tick.TotalTurnover >= prev.TotalTurnover {
+		tick.TurnOver = tick.TotalTurnover - prev.TotalTurnover
+	} else {
+		log.Printf("[cache] amt rollback %s.%s total %.0f->%.0f", exchg, code, prev.TotalTurnover, tick.TotalTurnover)
+		tick.TurnOver = 0
+	}
+	// OpenInterest 差分（允许负值）
+	tick.DiffInterest = tick.OpenInterest - prev.OpenInterest
+	// 写入
 	buf := &bytes.Buffer{}
 	_ = binary.Write(buf, binary.LittleEndian, tick)
 	copy(w.tcMap[off+4:off+4+rtTickSize()], buf.Bytes())

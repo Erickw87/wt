@@ -11,7 +11,7 @@ import (
 	"wtdata/internal/types"
 )
 
-// CloseToHis 将 rt 数据转存为历史 .dsb（对应 WtDataWriter::proc_loop 的转存顺序，简化：先实现 ticks/trans/orddtl/ordque/min1/min5）
+// CloseToHis 将 rt 数据转存为历史 .dsb（对应 WtDataWriter::proc_loop 的转存顺序，简化：先实现 ticks/trans/orddtl/ordque/min1/min5/day）
 func (w *Writer) CloseToHis(exchg string, code string, date uint32) error {
 	if !w.disableTick {
 		if err := w.dumpRTPayload(exchg, code, date, "ticks", types.BT_HIS_Ticks, rtTickSize()); err != nil { return err }
@@ -30,6 +30,17 @@ func (w *Writer) CloseToHis(exchg string, code string, date uint32) error {
 	}
 	if !w.disableMin5 {
 		if err := w.dumpRTBars(exchg, code, "min5", types.BT_HIS_Minute5); err != nil { return err }
+	}
+	// 日线快照（由上层生成 day K 数据后写入 rt/day/{exchg}/{code}.dmb，这里转存）
+	if !w.disableDay {
+		if err := w.dumpRTBars(exchg, code, "day", types.BT_HIS_Day); err != nil { return err }
+	}
+	// 标记与 snapshot
+	if err := w.WriteMarker(fmt.Sprintf("%s.%s", exchg, code), date); err == nil {
+		log.Printf("[close] marker updated %s.%s=%d", exchg, code, date)
+	}
+	if err := w.DumpSnapshot(date); err == nil {
+		log.Printf("[close] snapshot dumped for %d", date)
 	}
 	return nil
 }

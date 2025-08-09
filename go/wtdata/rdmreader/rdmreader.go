@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"wtdata/internal/adj"
 	"wtdata/internal/codec"
 	"wtdata/internal/rt"
 	"wtdata/internal/types"
@@ -21,6 +22,9 @@ type Reader struct {
 	baseDir string
 	// bars cache: key stdCode#period -> payload
 	bars map[string][]byte
+	// 复权
+	adjMap adj.Map
+	adjustFlg uint32
 }
 
 func (r *Reader) Init(base string) {
@@ -29,6 +33,15 @@ func (r *Reader) Init(base string) {
 	}
 	r.baseDir = base
 	r.bars = map[string][]byte{}
+	r.adjMap = adj.Map{}
+}
+
+func (r *Reader) LoadAdjFactorsFromFile(path string, adjustFlag uint32) error {
+	m, err := adj.LoadFromFile(path)
+	if err != nil { return err }
+	r.adjMap = m
+	r.adjustFlg = adjustFlag
+	return nil
 }
 
 // ReadTickSliceByRange（对应 WtRdmDtReader::readTickSliceByRange），简化：按历史当日文件与 rt 拼接
@@ -122,7 +135,7 @@ func (r *Reader) extractTicks(payload []byte, from int, n int) []types.WTSTickSt
 
 // --------------------- Bars Range ---------------------
 
-// ReadBarSliceByRange 读取区间 bars（分钟/日），拼接历史与当日 rt（分钟）
+// ReadBarSliceByRange 读取区间 bars（分钟/日），拼接历史与当日 rt（分钟），并支持 QFQ/HFQ
 func (r *Reader) ReadBarSliceByRange(stdCode, exchg, code string, period int, stime, etime uint64) ([]types.WTSBarStruct, error) {
 	pname := types.PERIOD_NAME[period]
 	// 历史
@@ -138,6 +151,7 @@ func (r *Reader) ReadBarSliceByRange(stdCode, exchg, code string, period int, st
 		}
 	}
 	// 当日 rt 仅分钟
+	var rtBars []types.WTSBarStruct
 	if period == types.KP_Minute1 || period == types.KP_Minute5 {
 		rtSub := "min1"
 		if period == types.KP_Minute5 { rtSub = "min5" }
@@ -147,11 +161,24 @@ func (r *Reader) ReadBarSliceByRange(stdCode, exchg, code string, period int, st
 			if err == nil && size > 0 {
 				sIdx, eIdx := r.rangeIndexBars(payload, period, stime, etime)
 				if sIdx <= eIdx && eIdx < int(size) {
-					res = append(res, r.extractBars(payload, sIdx, eIdx-sIdx+1)...)
+					rtBars = append(rtBars, r.extractBars(payload, sIdx, eIdx-sIdx+1)...)
 				}
 			}
 		}
 	}
+	// 复权
+	var exright byte
+	if len(stdCode) > 0 { exright = stdCode[len(stdCode)-1] }
+	if exright == byte(types.SUFFIX_QFQ) || exright == byte(types.SUFFIX_HFQ) {
+		fkey := fmt.Sprintf("%s.STK.%s", exchg, code)
+		base := adj.GetLastFactor(r.adjMap, fkey)
+		if exright == byte(types.SUFFIX_QFQ) {
+			adjustBarsPerDate(res, r.adjMap, fkey, base, r.adjustFlg)
+		} else {
+			adjustBarsPerDate(rtBars, r.adjMap, fkey, 1.0, r.adjustFlg)
+		}
+	}
+	res = append(res, rtBars...)
 	if len(res) == 0 { return nil, errors.New("no bars in range") }
 	log.Printf("[rdm] bars %s.%s %s range %d-%d -> %d rows", exchg, code, pname, stime, etime, len(res))
 	return res, nil
