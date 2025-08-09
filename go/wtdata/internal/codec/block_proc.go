@@ -5,6 +5,8 @@ package codec
 import (
 	"encoding/binary"
 	"errors"
+
+	"wtdata/internal/types"
 )
 
 // Block header layouts（对应 DataDefine.h）
@@ -31,8 +33,8 @@ const (
 )
 
 // ProcBlockData 等价于 C++ 的 proc_block_data，返回净荷数据（可选择是否保留头部）。
-// isBar 用于旧版结构转换（当前先不实现旧版转换，如需兼容可后续扩展）。
-func ProcBlockData(content []byte, isBar bool, keepHead bool) ([]byte, error) {
+// 自动识别 V1/V2；V1 的 bars/ticks 自动转换为新版布局；其他类型按原样返回。
+func ProcBlockData(content []byte, _isBar bool, keepHead bool) ([]byte, error) {
 	if len(content) < 8+2+2 {
 		return nil, errors.New("content too small")
 	}
@@ -81,21 +83,51 @@ func ProcBlockData(content []byte, isBar bool, keepHead bool) ([]byte, error) {
 				return content[12:], nil
 			}
 			if h.Ver == BLOCK_VERSION_CMP {
-				// 旧版压缩头（V1），C++ 会直接取头后数据并解压；但 V1 格式未携带压缩大小，需要协议约定。
-				// 本实现聚焦 V2 路径，V1 支持将后续补齐。
-				return nil, errors.New("BLOCK_VERSION_CMP (V1) not supported yet")
+				// 旧版压缩头（V1）：直接对头后面数据解压
+				ud, err := DecompressZstd(content[12:])
+				if err != nil { return nil, err }
+				// bars/ticks 需要从 Old -> New
+				newPayload, err := convertIfOld(h.Type, ud)
+				if err != nil { return nil, err }
+				if keepHead {
+					buf := make([]byte, 12)
+					copy(buf[0:8], blkMagic[:])
+					binary.LittleEndian.PutUint16(buf[8:10], h.Type)
+					binary.LittleEndian.PutUint16(buf[10:12], BLOCK_VERSION_RAW_V2)
+					buf = append(buf, newPayload...)
+					return buf, nil
+				}
+				return newPayload, nil
 			}
 			if h.Ver == BLOCK_VERSION_RAW {
-				// 旧版未压缩且旧结构体，C++ 会直接去掉头并做老到新结构转换。
-				// 先直接去头返回，转换逻辑留待调用端按需要处理。
+				payload := content[12:]
+				newPayload, err := convertIfOld(h.Type, payload)
+				if err != nil { return nil, err }
 				if keepHead {
-					return content, nil
+					buf := make([]byte, 12)
+					copy(buf[0:8], blkMagic[:])
+					binary.LittleEndian.PutUint16(buf[8:10], h.Type)
+					binary.LittleEndian.PutUint16(buf[10:12], BLOCK_VERSION_RAW_V2)
+					buf = append(buf, newPayload...)
+					return buf, nil
 				}
-				return content[12:], nil
+				return newPayload, nil
 			}
 		}
 	}
 
 	// 无法识别
 	return nil, errors.New("unknown block header or version")
+}
+
+// convertIfOld 将 V1 Old payload 转换成 V2 New；仅对 bars/ticks 生效，其他直接透传
+func convertIfOld(blkType uint16, payload []byte) ([]byte, error) {
+	switch blkType {
+	case types.BT_RT_Minute1, types.BT_RT_Minute5, types.BT_HIS_Minute1, types.BT_HIS_Minute5, types.BT_HIS_Day:
+		return BarOldToNew(payload)
+	case types.BT_RT_Ticks, types.BT_HIS_Ticks:
+		return TickOldToNew(payload)
+	default:
+		return payload, nil
+	}
 }
