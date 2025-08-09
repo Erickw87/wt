@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"wtdata/internal/adj"
 	"wtdata/internal/codec"
 	"wtdata/internal/rt"
 	"wtdata/internal/types"
@@ -32,6 +33,9 @@ type Reader struct {
 
 	// bars 缓存（类似 _bars_cache）
 	bars map[string][]byte // key: stdCode#period -> payload (WTSBarStruct[])
+
+	// 除权因子
+	adjMap adj.Map
 }
 
 func (r *Reader) Init(base string, hisPath string, adjustFlag uint32) {
@@ -51,6 +55,15 @@ func (r *Reader) Init(base string, hisPath string, adjustFlag uint32) {
 	r.hisOQue = map[string][]byte{}
 	r.hisTran = map[string][]byte{}
 	r.bars = map[string][]byte{}
+	r.adjMap = adj.Map{}
+}
+
+// LoadAdjFactorsFromFile（对应 WtDataReader::loadStkAdjFactorsFromFile）
+func (r *Reader) LoadAdjFactorsFromFile(path string) error {
+	m, err := adj.LoadFromFile(path)
+	if err != nil { return err }
+	r.adjMap = m
+	return nil
 }
 
 // ---------------- Tick/Order/Trans by count ----------------
@@ -348,7 +361,7 @@ func (r *Reader) extractTrans(payload []byte, from int, n int) []types.WTSTransS
 
 // ---------------- Bars by count ----------------
 
-// ReadKlineSlice 读取最后 count 根K线（对应 WtDataReader::readKlineSlice，简化：无主连/复权）
+// ReadKlineSlice 读取最后 count 根K线（对应 WtDataReader::readKlineSlice，支持 QFQ/HFQ 简化复权）
 func (r *Reader) ReadKlineSlice(stdCode string, exchg string, code string, period int, count uint32, etime uint64) ([]types.WTSBarStruct, error) {
 	key := fmt.Sprintf("%s#%d", stdCode, period)
 	payload := r.bars[key]
@@ -361,21 +374,41 @@ func (r *Reader) ReadKlineSlice(stdCode string, exchg string, code string, perio
 		r.bars[key] = payload
 	}
 	bars := r.extractBarsTail(payload, int(count))
+	// 复权检测（标准代码尾部 '-' 前复权，'+' 后复权）
+	var exright byte
+	if len(stdCode) > 0 {
+		exright = stdCode[len(stdCode)-1]
+	}
 	// 追加 rt 当日部分
 	rtSub := "min1"
 	if period == types.KP_Minute5 {
 		rtSub = "min5"
 	}
+	var rtBars []types.WTSBarStruct
 	if period == types.KP_Minute1 || period == types.KP_Minute5 {
 		rtPath := filepath.Join(r.rtDir, rtSub, exchg, fmt.Sprintf("%s.dmb", code))
 		if st, err := os.Stat(rtPath); err == nil && st.Size() > 0 {
 			_, size, payloadRt, err := rt.ReadKlineBlock(rtPath)
 			if err == nil && size > 0 {
 				cur := r.extractBarsTail(payloadRt, min(int(count)-len(bars), int(size)))
-				bars = append(bars, cur...)
+				rtBars = append(rtBars, cur...)
 			}
 		}
 	}
+	// 复权应用
+	if exright == byte(types.SUFFIX_QFQ) || exright == byte(types.SUFFIX_HFQ) {
+		// 构造因子键（缺省使用 STK PID）
+		fkey := fmt.Sprintf("%s.STK.%s", exchg, code)
+		base := adj.GetLastFactor(r.adjMap, fkey)
+		if exright == byte(types.SUFFIX_QFQ) {
+			// 历史部分按日期各自折算为 factor/date / base
+			adjustBarsPerDate(bars, r.adjMap, fkey, base, r.adjustFlg)
+		} else if exright == byte(types.SUFFIX_HFQ) {
+			// 后复权：仅对 rt 追加部分缩放
+			adjustBarsPerDate(rtBars, r.adjMap, fkey, 1.0, r.adjustFlg) // base=1 表示直接按当前因子缩放
+		}
+	}
+	bars = append(bars, rtBars...)
 	if len(bars) == 0 {
 		return nil, errors.New("no bars available")
 	}
