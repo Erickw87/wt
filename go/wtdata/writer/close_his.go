@@ -31,9 +31,16 @@ func (w *Writer) CloseToHis(exchg string, code string, date uint32) error {
 	if !w.disableMin5 {
 		if err := w.dumpRTBars(exchg, code, "min5", types.BT_HIS_Minute5); err != nil { return err }
 	}
-	// 日线快照（由上层生成 day K 数据后写入 rt/day/{exchg}/{code}.dmb，这里转存）
+	// 日线快照（由上层生成 day K 数据后写入 rt/day/{exchg}/{code}.dmb，这里转存；若无 day.dmb，尝试聚合 min1 生成当日）
 	if !w.disableDay {
-		if err := w.dumpRTBars(exchg, code, "day", types.BT_HIS_Day); err != nil { return err }
+		rtDay := filepath.Join(w.baseDir, "rt", "day", exchg, fmt.Sprintf("%s.dmb", code))
+		if st, err := os.Stat(rtDay); err == nil && st.Size() >= 24 {
+			if err := w.dumpRTBars(exchg, code, "day", types.BT_HIS_Day); err != nil { return err }
+		} else {
+			if bar, err := w.aggregateDayFromRT(exchg, code, date); err == nil && bar != nil {
+				if err := w.upsertDayToHis(exchg, code, bar); err != nil { return err }
+			}
+		}
 	}
 	// 标记与 snapshot
 	if err := w.WriteMarker(fmt.Sprintf("%s.%s", exchg, code), date); err == nil {
