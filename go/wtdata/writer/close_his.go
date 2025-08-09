@@ -3,6 +3,7 @@ package writer
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -47,6 +48,7 @@ func (w *Writer) dumpRTPayload(exchg, code string, date uint32, subdir string, h
 	outDir := filepath.Join(w.baseDir, "his", subdir, exchg, fmt.Sprintf("%d", date))
 	_ = os.MkdirAll(outDir, 0o755)
 	fn := filepath.Join(outDir, fmt.Sprintf("%s.dsb", code))
+	log.Printf("[close] %s -> %s (%d bytes, type=%d)", rtPath, fn, len(payload), hisType)
 	return os.WriteFile(fn, append(head, cmp...), 0o644)
 }
 
@@ -64,5 +66,6 @@ func (w *Writer) dumpRTBars(exchg, code, subdir string, hisType uint16) error {
 	outDir := filepath.Join(w.baseDir, "his", subdir, exchg)
 	_ = os.MkdirAll(outDir, 0o755)
 	fn := filepath.Join(outDir, fmt.Sprintf("%s.dsb", code))
+	log.Printf("[close] %s -> %s (%d bytes, type=%d)", rtPath, fn, len(payload), hisType)
 	return os.WriteFile(fn, append(head, cmp...), 0o644)
 }

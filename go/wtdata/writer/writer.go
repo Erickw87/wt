@@ -5,6 +5,7 @@ package writer
 import (
 	"bytes"
 	"encoding/binary"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -51,6 +52,7 @@ func (w *Writer) WriteTick(exchg string, code string, date uint32, tick *types.W
 	m2, err := w.appendOne(f, mapped, buf.Bytes(), rtTickSize())
 	if err != nil { return err }
 	_ = m2 // keep mapped alive until function returns
+	log.Printf("[tick] %s.%s date=%d time=%d price=%.8f", exchg, code, tick.TradingDate, tick.ActionTime, tick.Price)
 	// 更新 TickCache
 	_ = w.UpdateTickCache(exchg, code, date, tick)
 	return nil

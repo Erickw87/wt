@@ -5,6 +5,7 @@ package writer
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -41,6 +42,7 @@ func (w *Writer) openMapped(dir, exchg, code string, blkType uint16, date uint32
 		binary.LittleEndian.PutUint32(mapped[20:24], date)
 		size = 0
 		capacity = uint32(cap)
+		log.Printf("[rt] init %s type=%d cap=%d date=%d", fn, blkType, cap, date)
 		return
 	}
 	// 已存在
@@ -54,6 +56,7 @@ func (w *Writer) openMapped(dir, exchg, code string, blkType uint16, date uint32
 		binary.LittleEndian.PutUint32(mapped[12:16], 0)
 		binary.LittleEndian.PutUint32(mapped[20:24], date)
 		size = 0
+		log.Printf("[rt] reset date %s %d->%d", fn, oldDate, date)
 	}
 	return
 }
@@ -63,6 +66,7 @@ func (w *Writer) ensureCapacity(f *os.File, mapped []byte, elemSize int, newCapa
 	if err := mm.Unmap(mapped); err != nil { return nil, err }
 	sz := rtHeaderLen + int(newCapacity)*elemSize
 	if err := mm.EnsureSize(f, int64(sz)); err != nil { return nil, err }
+	log.Printf("[rt] expand %s -> cap=%d", f.Name(), newCapacity)
 	return mm.MapRW(f, sz)
 }
 
