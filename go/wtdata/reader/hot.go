@@ -167,3 +167,22 @@ func applyHotFactorToBar(bar *types.WTSBarStruct, factor float64, flag uint32) {
 func applyHotFactorToBars(bars []types.WTSBarStruct, factor float64, flag uint32) {
 	for i := range bars { applyHotFactorToBar(&bars[i], factor, flag) }
 }
+
+// scaleBarsByHotSections 对拼接后的 bars 按所在段应用因子（base 为 QFQ 的最后段因子或 HFQ 的 1）
+func scaleBarsByHotSections(bars []types.WTSBarStruct, exchg, product, rule string, base float64, flag uint32) {
+	key := fmt.Sprintf("%s.%s_%s", exchg, product, rule)
+	secs := hotSections[key]
+	if len(secs) == 0 { return }
+	for i := range bars {
+		f := 1.0
+		for j := len(secs)-1; j>=0; j-- {
+			if bars[i].Date >= secs[j].SDate && bars[i].Date <= secs[j].EDate { f = secs[j].Factor; break }
+		}
+		applyHotFactorToBar(&bars[i], f/base, flag)
+	}
+}
+
+// SetCustomRule 外部注入主连分段（简化版），同 AddHotSections
+func (r *Reader) SetCustomRule(exchg, product, rule string, secs []HotSection) {
+	AddHotSections(exchg, product, rule, secs)
+}
