@@ -5,7 +5,6 @@ package writer
 import (
 	"bytes"
 	"encoding/binary"
-	"fmt"
 	"path/filepath"
 
 	"wtdata/internal/types"
@@ -48,10 +47,3 @@ func (w *Writer) WriteTick(exchg string, code string, date uint32, tick *types.W
 }
 
 func rtTickSize() int { return 512 }
-
-// CloseToHis 将 rt 数据转存为历史 .dsb（对应 WtDataWriter::proc_loop 的转存逻辑，后续文件压缩在其他单元实现）
-func (w *Writer) CloseToHis(exchg string, code string, date uint32) error {
-	// 留空，后续实现完整转存（tick/trans/orddtl/ordque/min1/min5/day）
-	fmt.Printf("CloseToHis pending for %s.%s on %d\n", exchg, code, date)
-	return nil
-}
